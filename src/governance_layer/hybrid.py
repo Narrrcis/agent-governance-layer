@@ -12,8 +12,9 @@ from collections.abc import Callable
 from dataclasses import replace
 
 from .actual_risk import build_actual_net_risk_audit
+from .errors import GovernanceAdapterError
 from .models import CapabilityPermission, GateDecision, OrderProposal
-from .order_gate import apply_permission, assess_order
+from .order_gate import apply_permission, assess_order, authorize_permission
 from .permissions import SCALAR_ACTION_CAP
 
 Gate = Callable[..., GateDecision]
@@ -91,14 +92,34 @@ def execute_hybrid(
     orders_this_interval: int = 0,
     pre_long_position: int | None = None,
     pre_short_position: int | None = None,
+    evaluation_time: str | None = None,
     gate: Gate = apply_permission,
 ) -> GateDecision:
-    """Combine capability authorization with existing scalar sizing and fallback."""
+    """Combine capability authorization with existing scalar sizing and fallback.
 
+    Authorization is verified before the adapter call and is never degraded.
+    An adapter that wants the scalar fallback must raise
+    :class:`~governance_layer.errors.GovernanceAdapterError`; every other
+    exception propagates.
+    """
+
+    if (pre_long_position is None) != (pre_short_position is None):
+        raise ValueError("provide both pre_long_position and pre_short_position")
     if pre_long_position is None:
         pre_long_position = max(0, position)
         pre_short_position = max(0, -position)
     assert pre_short_position is not None
+    if pre_long_position < 0 or pre_short_position < 0:
+        raise ValueError("long and short positions must be non-negative")
+    if pre_long_position - pre_short_position != position:
+        raise ValueError("long/short positions do not match signed position")
+
+    # Authorization happens outside the try block. If the permission is
+    # malformed, expired, or issued to another agent, this raises and the order
+    # fails closed. Only an adapter failure below may reach the scalar
+    # fallback, and only for a request that is already authorized.
+    authorize_permission(order, permission, evaluation_time=evaluation_time)
+
     try:
         decision = gate(
             order,
@@ -108,7 +129,7 @@ def execute_hybrid(
             pre_long_position=pre_long_position,
             pre_short_position=pre_short_position,
         )
-    except Exception as exc:
+    except GovernanceAdapterError as exc:
         return scalar_fallback_decision(
             order,
             position,

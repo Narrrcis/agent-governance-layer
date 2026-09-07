@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from governance_layer import (
+    GovernanceAdapterError,
     OrderProposal,
     apply_permission,
     assess_native_execution_plan,
@@ -187,7 +188,7 @@ def test_restricted_and_isolated_preserve_reduce_cover_and_cancel() -> None:
 
 def test_scalar_fallback_returns_a_safe_reduction_after_injected_hybrid_error() -> None:
     def failing_gate(*_args, **_kwargs):
-        raise RuntimeError("injected hybrid failure")
+        raise GovernanceAdapterError("injected adapter failure")
 
     decision = execute_hybrid(
         proposal("SELL", 5),

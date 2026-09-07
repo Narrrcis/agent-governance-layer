@@ -2,12 +2,77 @@
 
 from __future__ import annotations
 
-import uuid
-from datetime import datetime, timedelta
+import hashlib
+import json
+from dataclasses import asdict, replace
+from datetime import timedelta
+from typing import TypedDict
 
-from .models import CapabilityPermission
+from .models import CapabilityPermission, parse_governance_time
 
-ROLE_BASE = {
+
+class RoleEnvelope(TypedDict):
+    """Absolute limits for a role, before the state multiplier is applied."""
+
+    allow_open_short: bool
+    max_order_notional: float
+    max_position_notional: float
+    max_gross_exposure: float
+    max_net_exposure: float
+    max_orders_per_interval: int
+
+
+class StateRule(TypedDict):
+    """What a governance state permits, and how hard it scales the envelope.
+
+    ``short`` is tri-valued: ``True``/``False`` decide directly, ``"BASE"``
+    defers to the role envelope, and ``"CONDITIONAL"`` grants the capability to
+    market makers only.
+    """
+
+    multiplier: float
+    new: bool
+    increase: bool
+    short: bool | str
+    reduce: bool
+    market: bool
+    limit: bool
+    cancel: bool
+    frequency: float
+
+# Bumped whenever the state-to-capability mapping below changes meaning. It is
+# part of the decision-ID material, so a permission issued under a different
+# policy can never collide with this one.
+POLICY_SCHEMA_VERSION = "governance_policy_v2.1.0"
+
+
+def derive_decision_id(
+    permission: CapabilityPermission,
+    *,
+    run_id: str,
+    index: int,
+) -> str:
+    """Derive a decision ID that commits to the entire permission.
+
+    The ID is a SHA-256 over the canonical JSON of every field except the ID
+    itself, plus the policy schema version and the issuing run and index. Two
+    permissions that differ in state, role, reason, validity window or any
+    limit therefore get different IDs, so an ID can be used to detect a
+    substituted or replayed authorization rather than merely to label one.
+    """
+
+    payload = asdict(permission)
+    payload.pop("governance_decision_id", None)
+    material = {
+        "policy_schema_version": POLICY_SCHEMA_VERSION,
+        "run_id": run_id,
+        "index": index,
+        "permission": payload,
+    }
+    encoded = json.dumps(material, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+ROLE_BASE: dict[str, RoleEnvelope] = {
     "market_maker": {
         "allow_open_short": True,
         "max_order_notional": 12000.0,
@@ -35,7 +100,7 @@ ROLE_BASE = {
 }
 
 
-STATE_RULES = {
+STATE_RULES: dict[str, StateRule] = {
     "NORMAL": dict(
         multiplier=1.0,
         new=True,
@@ -117,18 +182,17 @@ def permission_for(
 ) -> CapabilityPermission:
     base = ROLE_BASE[role]
     rule = STATE_RULES[state]
-    allow_short = (
-        base["allow_open_short"]
-        if rule["short"] == "BASE"
-        else role == "market_maker"
-        if rule["short"] == "CONDITIONAL"
-        else bool(rule["short"])
-    )
-    current = datetime.fromisoformat(governance_time)
+    short_rule = rule["short"]
+    if short_rule == "BASE":
+        allow_short = base["allow_open_short"]
+    elif short_rule == "CONDITIONAL":
+        allow_short = role == "market_maker"
+    else:
+        allow_short = bool(short_rule)
+    current = parse_governance_time(governance_time, "governance_time")
     multiplier = float(rule["multiplier"])
-    decision_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{run_id}|{index}|{agent_id}|capability"))
-    return CapabilityPermission(
-        governance_decision_id=decision_id,
+    permission = CapabilityPermission(
+        governance_decision_id="",
         agent_id=agent_id,
         governance_state=state,
         valid_from=governance_time,
@@ -148,10 +212,14 @@ def permission_for(
         max_gross_leverage=None,
         max_orders_per_interval=max(1, int(base["max_orders_per_interval"] * rule["frequency"])),
         reason_code=reason_code,
+    )
+    return replace(
+        permission,
+        governance_decision_id=derive_decision_id(permission, run_id=run_id, index=index),
     ).validate()
 
 
-SCALAR_ACTION_CAP = {
+SCALAR_ACTION_CAP: dict[str, float] = {
     "NORMAL": 1.0,
     "CAUTION": 0.85,
     "RESTRICTED": 0.60,

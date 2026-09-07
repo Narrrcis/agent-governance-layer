@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from .actual_risk import build_actual_net_risk_audit, finalize_actual_net_risk_audit
+from .errors import PermissionExpiredError, PermissionInvalidError
 from .models import (
     CapabilityPermission,
     GateDecision,
@@ -12,7 +13,45 @@ from .models import (
     OrderIntent,
     OrderProposal,
     RiskEffect,
+    parse_governance_time,
 )
+
+
+def authorize_permission(
+    order: OrderProposal,
+    permission: CapabilityPermission,
+    *,
+    evaluation_time: str | None = None,
+) -> None:
+    """Check that this permission may authorize this order, at this time.
+
+    Raises on failure and returns ``None`` on success, so that no caller can
+    mistake a falsy return value for authorization. This runs before any gating
+    logic and is never absorbed by a fallback path.
+
+    The evaluation time defaults to the order's ``proposed_at``. A runtime whose
+    gate runs materially later than the proposal should pass its own clock
+    reading explicitly, so that the window is checked against the moment the
+    authorization is actually consumed.
+    """
+
+    order.validate()
+    permission.validate()
+    if order.agent_id != permission.agent_id:
+        raise PermissionInvalidError("permission agent does not match order agent")
+    evaluation = parse_governance_time(
+        order.proposed_at if evaluation_time is None else evaluation_time,
+        "evaluation time",
+    )
+    valid_from, valid_until = permission.window()
+    if evaluation < valid_from:
+        raise PermissionExpiredError(
+            f"permission is not yet valid: {evaluation.isoformat()} < {valid_from.isoformat()}"
+        )
+    if evaluation > valid_until:
+        raise PermissionExpiredError(
+            f"permission has expired: {evaluation.isoformat()} > {valid_until.isoformat()}"
+        )
 
 
 def assess_order(order: OrderProposal, position: int) -> IntentAssessment:
@@ -77,10 +116,9 @@ def _apply_permission_core(
     permission: CapabilityPermission,
     *,
     orders_this_interval: int = 0,
+    evaluation_time: str | None = None,
 ) -> GateDecision:
-    permission.validate()
-    if order.agent_id != permission.agent_id:
-        raise ValueError("permission agent does not match order agent")
+    authorize_permission(order, permission, evaluation_time=evaluation_time)
     assessment = assess_order(order, position)
     reduction = assessment.risk_effect == RiskEffect.REDUCE.value
     quantity = order.quantity
@@ -191,6 +229,7 @@ def apply_permission(
     orders_this_interval: int = 0,
     pre_long_position: int | None = None,
     pre_short_position: int | None = None,
+    evaluation_time: str | None = None,
 ) -> GateDecision:
     """Apply capability permission and attach the V2.1 authorization audit.
 
@@ -212,6 +251,7 @@ def apply_permission(
         position,
         permission,
         orders_this_interval=orders_this_interval,
+        evaluation_time=evaluation_time,
     )
     return replace(
         decision,

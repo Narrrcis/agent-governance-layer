@@ -400,8 +400,16 @@ def finalize_actual_net_risk_audit(
             post_short_position=post_short_position,
             price=execution_price or audit.price,
         )
-        if executed.quantity > executed_quantity:
-            raise ValueError("observed position delta exceeds cumulative executed quantity")
+        # Strict reconciliation. An observed delta that is smaller than the
+        # claimed fill is just as much an accounting break as one that is
+        # larger: it would let a caller assert an execution the venue never
+        # applied. The audit's whole promise is that proposed, authorized and
+        # executed quantities reconcile, so the two must agree exactly.
+        if executed.quantity != executed_quantity:
+            raise ValueError(
+                "observed position delta does not match executed quantity: "
+                f"observed {executed.quantity}, claimed {executed_quantity}"
+            )
     return ActualNetRiskAuditV2(
         audit_semantics_version=audit.audit_semantics_version,
         side=audit.side,

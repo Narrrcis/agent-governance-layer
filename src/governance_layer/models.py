@@ -3,11 +3,33 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from .errors import PermissionInvalidError
+
 if TYPE_CHECKING:
     from .actual_risk import ActualNetRiskAuditV2
+
+
+def parse_governance_time(value: str, field: str) -> datetime:
+    """Parse an ISO-8601 timestamp, requiring it to be time-zone aware.
+
+    A naive timestamp is rejected rather than assumed to be UTC: the layer
+    compares times issued by different components, and a silent local-time
+    assumption would widen or shrink a validity window without any signal.
+    """
+
+    if not isinstance(value, str) or not value:
+        raise PermissionInvalidError(f"{field} must be an ISO-8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise PermissionInvalidError(f"{field} is not a valid ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise PermissionInvalidError(f"{field} must be time-zone aware")
+    return parsed
 
 
 class OrderIntent(str, Enum):
@@ -75,7 +97,19 @@ class CapabilityPermission:
             raise ValueError("StockSim has no genuine leverage accounting")
         if self.max_orders_per_interval < 0:
             raise ValueError("order frequency limit must be non-negative")
+        valid_from = parse_governance_time(self.valid_from, "valid_from")
+        valid_until = parse_governance_time(self.valid_until, "valid_until")
+        if valid_until < valid_from:
+            raise PermissionInvalidError("valid_until precedes valid_from")
         return self
+
+    def window(self) -> tuple[datetime, datetime]:
+        """Return the validity window as aware datetimes."""
+
+        return (
+            parse_governance_time(self.valid_from, "valid_from"),
+            parse_governance_time(self.valid_until, "valid_until"),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self.validate())

@@ -10,6 +10,12 @@ from .actual_risk import (
     build_actual_net_risk_audit,
     finalize_actual_net_risk_audit,
 )
+from .errors import (
+    GovernanceAdapterError,
+    GovernanceError,
+    PermissionExpiredError,
+    PermissionInvalidError,
+)
 from .execution_audit import ExecutionAuditEvent, StockSimExecutionAuditBridge
 from .fill_retention import FILL_RETENTION_VERSION, FillRetentionAccumulator
 from .hybrid import execute_hybrid, scalar_fallback_decision
@@ -21,9 +27,22 @@ from .models import (
     OrderProposal,
     RiskEffect,
 )
-from .order_gate import apply_permission, assess_order, pending_order_action, record_execution
+from .order_gate import (
+    apply_permission,
+    assess_order,
+    authorize_permission,
+    pending_order_action,
+    record_execution,
+)
 from .pending_guard import PendingNativeOrderDecision, pending_native_order_action
-from .permissions import ROLE_BASE, SCALAR_ACTION_CAP, STATE_RULES, permission_for
+from .permissions import (
+    POLICY_SCHEMA_VERSION,
+    ROLE_BASE,
+    SCALAR_ACTION_CAP,
+    STATE_RULES,
+    derive_decision_id,
+    permission_for,
+)
 from .runtime_binding import (
     AUDIT_BINDING_VERSION,
     AuditIntegrityReport,
@@ -67,7 +86,10 @@ __all__ = [
     "ExecutionAuditRecorder",
     "FILL_RETENTION_VERSION",
     "FillRetentionAccumulator",
+    "POLICY_SCHEMA_VERSION",
     "GateDecision",
+    "GovernanceAdapterError",
+    "GovernanceError",
     "GovernanceProfile",
     "GovernanceState",
     "IntentAssessment",
@@ -75,6 +97,8 @@ __all__ = [
     "OrderIntent",
     "OrderProposal",
     "PendingNativeOrderDecision",
+    "PermissionExpiredError",
+    "PermissionInvalidError",
     "PolicyParameters",
     "ROLE_BASE",
     "ROLE_PARAMETER_OVERRIDES",
@@ -92,11 +116,13 @@ __all__ = [
     "apply_permission",
     "assess_native_execution_plan",
     "assess_order",
+    "authorize_permission",
     "assess_risk_change",
     "assess_observed_risk_change",
     "build_actual_net_risk_audit",
     "build_execution_audit_recorder",
     "confidence_calibration",
+    "derive_decision_id",
     "eligible_completed_outcomes",
     "execute_hybrid",
     "fill_quantity_from_delta",
