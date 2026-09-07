@@ -252,7 +252,19 @@ class NullExecutionAuditRecorder:
 
 
 class ExecutionAuditRecorder:
-    """One bridge, one agent, one run, one audit directory."""
+    """One bridge, one agent, one run, one audit directory.
+
+    **Not thread-safe.** The dedup set, order maps and cumulative counters are
+    unsynchronised. This is safe under the runtime it was built for, where the
+    simulator spawns one process per agent and delivers order and execution
+    callbacks on that process's single asyncio event loop.
+
+    If your runtime dispatches execution callbacks across a thread pool, give
+    each agent a recorder confined to one thread or hold your own lock around
+    every call. Sharing one recorder across threads makes fill deduplication
+    and cumulative quantities racy, which corrupts the audit silently rather
+    than raising.
+    """
 
     governed = True
 
