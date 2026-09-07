@@ -4,6 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from governance_layer import (
     OrderProposal,
     apply_permission,
@@ -24,6 +26,24 @@ FROZEN_RUN = (
     / "runs"
     / "paired_effect_v1_1_A_hybrid_governance_v2_seed_20261023"
 )
+FROZEN_EVENTS = (
+    FROZEN_RUN
+    / "aml"
+    / "reports"
+    / "agents"
+    / "native_order_permission_events_retail_population.json"
+)
+FROZEN_METRICS = FROZEN_RUN / "episode_metrics.json"
+
+# The frozen paired-validation archive is deliberately outside this repository
+# (see "Scope" in the README).  These two regression tests replay it when the
+# archive is present next to the checkout and are skipped otherwise, so a clone
+# without the archive still reports an honest pass.
+requires_frozen_run = pytest.mark.skipif(
+    not (FROZEN_EVENTS.is_file() and FROZEN_METRICS.is_file()),
+    reason=f"frozen paired-validation run not available at {FROZEN_RUN}",
+)
+
 NOW = "2025-03-01T09:35:00+00:00"
 
 
@@ -58,15 +78,10 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+@requires_frozen_run
 def test_seed_20261023_h02_replay_has_no_actual_net_risk_increase() -> None:
-    events_path = (
-        FROZEN_RUN
-        / "aml"
-        / "reports"
-        / "agents"
-        / "native_order_permission_events_retail_population.json"
-    )
-    metrics_path = FROZEN_RUN / "episode_metrics.json"
+    events_path = FROZEN_EVENTS
+    metrics_path = FROZEN_METRICS
     event = next(
         row
         for row in json.loads(events_path.read_text(encoding="utf-8"))
@@ -186,15 +201,10 @@ def test_scalar_fallback_returns_a_safe_reduction_after_injected_hybrid_error() 
     assert decision.actual_net_risk_audit_v2.authorized_risk.actual_net_risk_increase == 0
 
 
+@requires_frozen_run
 def test_frozen_seed_evidence_is_not_written() -> None:
-    events_path = (
-        FROZEN_RUN
-        / "aml"
-        / "reports"
-        / "agents"
-        / "native_order_permission_events_retail_population.json"
-    )
-    metrics_path = FROZEN_RUN / "episode_metrics.json"
+    events_path = FROZEN_EVENTS
+    metrics_path = FROZEN_METRICS
     before = (digest(events_path), digest(metrics_path))
     test_seed_20261023_h02_replay_has_no_actual_net_risk_increase()
     assert (digest(events_path), digest(metrics_path)) == before

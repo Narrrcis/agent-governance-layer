@@ -218,7 +218,9 @@ pytest
 ```
 
 83 tests, no runtime dependencies outside the standard library, CI on Python
-3.11–3.13. API is alpha and may change.
+3.11–3.13. Two of the tests replay a frozen paired-validation run that lives
+outside this repository; a clean clone reports them as skipped rather than
+silently passing. API is alpha and may change.
 
 ## License
 
