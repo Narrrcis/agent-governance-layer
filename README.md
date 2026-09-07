@@ -7,8 +7,8 @@
 
 A deterministic capability layer that sits between an autonomous agent and a
 market venue. The agent decides *what* it wants to do; this layer decides
-*whether and how much* of that may actually reach execution — and proves, after
-the fact, that what executed matched what was authorized.
+*whether and how much* of that may actually reach execution, and proves after
+the fact that what executed matched what was authorized.
 
 Built as the governance core of an AML-Sim multi-agent market research platform,
 and extracted here as a standalone, dependency-free package.
@@ -16,32 +16,34 @@ and extracted here as a standalone, dependency-free package.
 > Research software for simulated markets. It does not connect to a broker,
 > give investment advice, or replace production risk controls.
 
----
-
 ## The problem
 
 An LLM-driven trading agent will occasionally be confidently wrong, silently
 degraded, or fed stale telemetry. Wrapping it in a prompt that says "be careful"
 is not a control. What is needed is a layer that is:
 
-- **outside the agent** — the agent cannot argue its way past it, or edit its own permissions;
-- **deterministic** — the same inputs always yield the same decision and the same decision ID;
-- **auditable** — every proposed, authorized, and executed quantity is recorded and reconcilable;
-- **fail-closed, but never fatal** — it may block new risk, and must never block the exit.
+- **Outside the agent.** It cannot argue its way past the layer or edit its own
+  permissions.
+- **Deterministic.** The same inputs always yield the same decision and the same
+  decision ID.
+- **Auditable.** Every proposed, authorized and executed quantity is recorded
+  and reconcilable.
+- **Fail-closed but never fatal.** It may block new risk. It must never block
+  the exit.
 
 ## Architecture
 
 ```text
- telemetry  ·  lagged outcomes  ·  exposure
+ telemetry, lagged outcomes, exposure
                      │
                      ▼
         ┌───────────────────────────┐
-        │  GovernanceStateMachine   │   hysteresis · cooldown · staged re-entry
+        │  GovernanceStateMachine   │   hysteresis, cooldown, staged re-entry
         └───────────────────────────┘
                      │  state
                      ▼
         ┌───────────────────────────┐
-        │   CapabilityPermission    │   role envelope × state rule
+        │   CapabilityPermission    │   role envelope x state rule
         └───────────────────────────┘
                      │
  agent proposal ─────┼─────► order gate ─► ALLOW / CLIP / REJECT ─► venue
@@ -56,15 +58,15 @@ only constrains.
 
 ## Five failure modes it is built around
 
-These are the cases that make a naive guardrail wrong, and each one is enforced
-by tests rather than by convention.
+These are the cases that make a naive guardrail wrong. Each one is enforced by
+tests rather than by convention.
 
 **1. Authorization is not execution.** The gap between what you allow and what
 the venue actually fills is where safety layers quietly break. Fill quantity is
-derived from the *observed* long/short position delta — never from the quantity
-on the request, and never from `allowed_quantity`. A simulator that clamps a
-short-cover to the inventory actually held can execute less than requested, or
-nothing at all; recording the request as the fill would corrupt every downstream
+derived from the *observed* long/short position delta, never from the quantity
+on the request and never from `allowed_quantity`. A simulator that clamps a
+short cover to the inventory actually held can execute less than requested, or
+nothing at all. Recording the request as the fill would corrupt every downstream
 risk number.
 
 **2. Zero-crossing orders carry two opposite effects.** `SELL 15` against a long
@@ -72,37 +74,38 @@ of 10 is 10 units of risk *reduction* plus 5 units of *new short exposure*. A
 reduce-only check that looks only at the side lets the second half through. The
 gate decomposes each order into closing and opening legs and clips at zero.
 
-**3. A blocked exit is worse than no governance.** Every state — including full
-isolation — keeps a protected path for risk-reducing actions. Restriction
-removes the ability to add exposure, never the ability to leave.
+**3. A blocked exit is worse than no governance.** Every state, including full
+isolation, keeps a protected path for risk-reducing actions. Restriction removes
+the ability to add exposure, never the ability to leave.
 
-**4. Recovery can deadlock.** Intervention causes drawdown; drawdown is then read
-as evidence that intervention is still needed. Without an explicit exit, an agent
-locks into the most restricted state permanently and governance itself amplifies
-tail risk. Recovery therefore requires *both* a cooldown *and* newly completed
-outcome evidence, and returns through staged re-entry rather than a single jump.
+**4. Recovery can deadlock.** Intervention causes drawdown, and that drawdown is
+then read as evidence that intervention is still needed. Without an explicit
+exit, an agent locks into the most restricted state permanently and governance
+itself amplifies tail risk. Recovery therefore requires *both* a cooldown *and*
+newly completed outcome evidence, and returns through staged re-entry rather
+than a single jump.
 
 **5. Punishing honest uncertainty is a real hazard.** If a self-reported
 low-confidence signal can trigger a hard lockdown, a well-calibrated agent is
 penalized precisely for being honest, and the rational adaptation is to
 overstate confidence. Confidence-only calibration signals are therefore capped
-at `CAUTION`; only material, independently observable risk can reach
+at `CAUTION`. Only material, independently observable risk can reach
 `RESTRICTED` or `ISOLATED`.
 
 ## Governance states
 
-`NORMAL → CAUTION → RESTRICTED → ISOLATED → STAGED_REENTRY_1 → STAGED_REENTRY_2`
+`NORMAL -> CAUTION -> RESTRICTED -> ISOLATED -> STAGED_REENTRY_1 -> STAGED_REENTRY_2`
 
-| State | Notional × | New position | Risk increase | Open short | Reduce-only |
+| State | Notional scale | New position | Risk increase | Open short | Reduce-only |
 |---|---:|:---:|:---:|:---:|:---:|
-| `NORMAL` | 1.00 | ✅ | ✅ | role default | — |
-| `CAUTION` | 0.60 | ✅ | ✅ | ❌ | — |
-| `RESTRICTED` | 0.40 | ❌ | ❌ | ❌ | ✅ |
-| `ISOLATED` | 0.25 | ❌ | ❌ | ❌ | ✅ |
-| `STAGED_REENTRY_1` | 0.30 | ✅ | ✅ | ❌ | — |
-| `STAGED_REENTRY_2` | 0.55 | ✅ | ✅ | market maker only | — |
+| `NORMAL` | 1.00 | yes | yes | role default | no |
+| `CAUTION` | 0.60 | yes | yes | no | no |
+| `RESTRICTED` | 0.40 | no | no | no | yes |
+| `ISOLATED` | 0.25 | no | no | no | yes |
+| `STAGED_REENTRY_1` | 0.30 | yes | yes | no | no |
+| `STAGED_REENTRY_2` | 0.55 | yes | yes | market maker only | no |
 
-Limits are a role envelope (retail / institutional / market maker) scaled by the
+Limits are a role envelope (retail, institutional, market maker) scaled by the
 state multiplier, so the same state means something different for a retail agent
 than for a market maker. Two profiles share one state machine: `V21_FULL` grants
 soft signals escalation authority, `V21_LEAN` records them without it.
@@ -143,7 +146,7 @@ straight out of `pytest -v`:
 
 | Invariant | Test |
 |---|---|
-| No look-ahead: inputs are tz-aware and available at or before the governance time | `test_future_data_cutoff_is_rejected` · `test_delayed_outcomes_are_not_visible_early` |
+| No look-ahead: inputs are tz-aware and available at or before the governance time | `test_future_data_cutoff_is_rejected`, `test_delayed_outcomes_are_not_visible_early` |
 | A risk-reducing order keeps a protected path even when new risk is blocked | `test_isolation_preserves_reduction_and_blocks_new_risk` |
 | Reduce-only cannot reverse a position through zero | `test_reduce_only_clips_zero_crossing` |
 | Recovery requires both a cooldown and newly completed evidence | `test_recovery_requires_new_evidence_and_cooldown` |
@@ -161,12 +164,12 @@ before_snapshot, after_snapshot)`. The bridge records each partial fill,
 cancellation, and cancel/execute race from the live pre- and post-fill
 positions.
 
-Two further properties are asserted rather than assumed: a fill already at the venue
-can never be undone by an audit failure, so every raw execution message is
-persisted before any derived record, and an audit failure marks the run
-ineligible for effect analysis instead of being swallowed; and an ungoverned run
-produces no governance audit at all, through an explicit no-op recorder rather
-than a partially initialised one.
+Two further properties are asserted rather than assumed. A fill that has already
+reached the venue can never be undone by an audit failure, so every raw
+execution message is persisted before any derived record, and an audit failure
+marks the run ineligible for effect analysis instead of being swallowed. And an
+ungoverned run produces no governance audit at all, through an explicit no-op
+recorder rather than a partially initialised one.
 
 ## How it was validated
 
@@ -179,33 +182,33 @@ protocol mattered more than any single result, so it is stated here in full:
 - **Isolating the intervention.** The frozen agent base coupled the audit bridge
   to the same flag as the governance constraints, so disabling governance would
   also have destroyed the independent audit. A separate flag was added to
-  disable *constraints* while keeping the audit path live — otherwise the
-  control arm would not have been measurable.
+  disable *constraints* while keeping the audit path live; otherwise the control
+  arm would not have been measurable.
 - **Removing a confound.** The deterministic pressure-order schedule was also
   coupled to the governance flag. The control arm keeps the identical schedule
   and releases every order at full size, so the arms differ only in governance.
 - **Native outcomes only.** Return and max drawdown are read from the
-  simulator's own portfolio time series; fills from its executed-order records;
+  simulator's own portfolio time series, fills from its executed-order records,
   authorized quantities from the permission decisions. Nothing is estimated,
   interpolated, or reconstructed.
 - **Pre-committed reporting.** No re-runs, no seed swapping, no deleted
-  directories; every completed episode enters the analysis, and both benefits
+  directories. Every completed episode enters the analysis, and both benefits
   and costs are reported.
 
 Two methodological findings shaped the design more than any headline number.
 Simulator noise across repeated identical-seed runs was measured first, and it
-turned out to exceed the effect size of several candidate configurations —
-which invalidated a set of small-effect conclusions and forced the paired
-design. And governance is a genuine trade-off, not a free win: reducing
-drawdown costs return, and there exist individual runs in which intervention
-*amplified* the drawdown it was meant to contain. Quantitative results are held
-for the accompanying capstone paper.
+turned out to exceed the effect size of several candidate configurations, which
+invalidated a set of small-effect conclusions and forced the paired design.
+Governance is also a genuine trade-off rather than a free win: reducing drawdown
+costs return, and there exist individual runs in which intervention *amplified*
+the drawdown it was meant to contain. Quantitative results are held for the
+accompanying capstone paper.
 
 ## Scope
 
 This repository is the reusable governance core. Simulator orchestration, broker
 connectivity, vendored runtimes, generated experiment outputs, prompts, and API
-logs are deliberately out of scope. To integrate: convert your agent's proposed
+logs are deliberately out of scope. To integrate, convert your agent's proposed
 action to an `OrderProposal`, call `apply_permission`, and execute only the
 returned `allowed_quantity`.
 
@@ -218,9 +221,9 @@ pytest
 ```
 
 83 tests, no runtime dependencies outside the standard library, CI on Python
-3.11–3.13. Two of the tests replay a frozen paired-validation run that lives
+3.11 to 3.13. Two of the tests replay a frozen paired-validation run that lives
 outside this repository; a clean clone reports them as skipped rather than
-silently passing. API is alpha and may change.
+silently passing. The API is alpha and may change.
 
 ## License
 
