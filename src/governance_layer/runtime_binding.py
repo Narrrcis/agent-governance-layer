@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
@@ -35,6 +36,30 @@ from .execution_audit import ExecutionAuditEvent, StockSimExecutionAuditBridge
 from .models import GateDecision, OrderProposal
 
 AUDIT_BINDING_VERSION = "governance_runtime_binding_v2.1.1"
+
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+def filesystem_agent_slug(agent_id: str) -> str:
+    """Return a filename-safe token that still identifies this agent uniquely.
+
+    Agent IDs come from simulator configuration and are not guaranteed to be
+    safe path components. Interpolating one straight into a filename would let
+    ``../`` or a path separator place audit artifacts outside the audit
+    directory. Unsafe characters are replaced, and whenever anything had to be
+    replaced a digest of the original is appended so that two distinct agents
+    can never collapse onto the same audit file.
+    """
+
+    cleaned = _UNSAFE_FILENAME_CHARS.sub("_", agent_id)
+    # Collapse dot runs so no artifact is ever named with a ".." component.
+    cleaned = re.sub(r"\.{2,}", "_", cleaned).strip(".")
+    if not cleaned:
+        cleaned = "agent"
+    if cleaned != agent_id or len(cleaned) > 64:
+        digest = hashlib.sha256(agent_id.encode("utf-8")).hexdigest()[:12]
+        return f"{cleaned[:64]}-{digest}"
+    return cleaned
 
 RAW_EVENT_FILE = "execution_events_raw.jsonl"
 AUDIT_EVENT_FILE = "execution_audit.jsonl"
@@ -247,6 +272,7 @@ class ExecutionAuditRecorder:
             raise ValueError("a governed execution audit requires an agent_id")
         self.run_id = run_id
         self.agent_id = agent_id
+        self.agent_slug = filesystem_agent_slug(agent_id)
         self.mechanism = mechanism
         self.audit_dir = Path(audit_dir)
         self.bridge = bridge or StockSimExecutionAuditBridge()
@@ -281,7 +307,14 @@ class ExecutionAuditRecorder:
             self._fail(REASON_AUDIT_WRITE_FAILED, f"cannot create {self.audit_dir}: {exc}")
 
     def _path(self, name: str) -> Path:
-        return self.audit_dir / f"{name.rsplit('.', 1)[0]}_{self.agent_id}.{name.rsplit('.', 1)[1]}"
+        stem, suffix = name.rsplit(".", 1)
+        candidate = self.audit_dir / f"{stem}_{self.agent_slug}.{suffix}"
+        # Defence in depth: the slug should already make this impossible, but
+        # an audit that escapes its directory is never acceptable.
+        base = self.audit_dir.resolve()
+        if not candidate.resolve().parent == base:
+            raise ValueError(f"audit path escapes the audit directory: {candidate}")
+        return candidate
 
     def _append(self, name: str, row: Mapping[str, Any]) -> None:
         payload = {
@@ -773,8 +806,10 @@ def recorder_from_env(
 
     env = os.environ if env is None else env
     enabled = env.get("GOVERNANCE_EXECUTION_AUDIT", "0") == "1"
-    audit_dir = env.get("GOVERNANCE_EXECUTION_AUDIT_DIR", "")
-    if not audit_dir:
+    configured = env.get("GOVERNANCE_EXECUTION_AUDIT_DIR", "")
+    if configured:
+        audit_dir = Path(configured)
+    else:
         base = default_audit_dir or Path(env.get("METRICS_OUTPUT_DIR", "metrics"))
         audit_dir = Path(base) / "governance_execution_audit"
     return build_execution_audit_recorder(

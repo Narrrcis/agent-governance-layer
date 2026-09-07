@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from enum import Enum
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -167,7 +168,11 @@ def parameters_for_role(parameters: PolicyParameters, role: str) -> PolicyParame
         overrides = ROLE_PARAMETER_OVERRIDES[role]
     except KeyError as exc:
         raise ValueError(f"unknown governance role: {role}") from exc
-    return replace(parameters, **overrides)
+    # ``replace`` cannot be typed through a heterogeneous override mapping, so
+    # the mapping is applied explicitly rather than silenced at the call site.
+    updated = asdict(parameters)
+    updated.update(overrides)
+    return PolicyParameters(**updated)
 
 
 @dataclass(frozen=True)
@@ -194,6 +199,30 @@ class StateObservation:
 
     def validate(self) -> StateObservation:
         now = parse_timestamp(self.governance_time)
+        if self.governance_index < 0:
+            raise ValueError("governance index must be non-negative")
+        # Unit-interval signals. A NaN would silently compare false against
+        # every threshold and read as healthy, so it is rejected outright
+        # rather than allowed to suppress an escalation.
+        for name, value in (
+            ("lagged_reliability", self.lagged_reliability),
+            ("confidence", self.confidence),
+            ("confidence_calibration", self.confidence_calibration),
+        ):
+            if not isfinite(value):
+                raise ValueError(f"{name} must be a finite number")
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be between zero and one")
+        # Ratios that may legitimately exceed one, because being over an
+        # exposure limit is exactly the condition governance reacts to.
+        for name, value in (
+            ("exposure_ratio", self.exposure_ratio),
+            ("current_risk_limit_scale", self.current_risk_limit_scale),
+        ):
+            if not isfinite(value):
+                raise ValueError(f"{name} must be a finite number")
+            if value < 0.0:
+                raise ValueError(f"{name} must be non-negative")
         if parse_timestamp(self.data_cutoff_timestamp) > now:
             raise ValueError("future state cutoff is not allowed")
         if (
@@ -209,8 +238,8 @@ class StateObservation:
         )
         if any(value < 0 for value in counts):
             raise ValueError("age, outcome, and signal counts must be non-negative")
-        for value in (self.calibration_brier, self.calibration_ece):
-            if value is not None and not 0.0 <= value <= 1.0:
+        for optional in (self.calibration_brier, self.calibration_ece):
+            if optional is not None and not 0.0 <= optional <= 1.0:
                 raise ValueError("calibration Brier and ECE must be between zero and one")
         return self
 
@@ -287,6 +316,34 @@ class AgentGovernanceStateMachine:
         self.last_transition_direction = ""
         self.ever_isolated = False
         self.recovery_epoch = 0
+        self._last_observation: StateObservation | None = None
+
+    def _reject_out_of_order(self, observation: StateObservation) -> None:
+        """Refuse an observation that moves backwards in time or in evidence.
+
+        Hysteresis, cooldowns and the recovery evidence floor are all counted
+        against monotonically advancing inputs. Replaying an older observation
+        would let a caller rewind the cooldown or re-present evidence that has
+        already been consumed, so the sequence is enforced rather than assumed.
+        """
+
+        previous = self._last_observation
+        if previous is None:
+            return
+        if observation.governance_index < previous.governance_index:
+            raise ValueError(
+                "governance index moved backwards: "
+                f"{observation.governance_index} < {previous.governance_index}"
+            )
+        if parse_timestamp(observation.governance_time) < parse_timestamp(
+            previous.governance_time
+        ):
+            raise ValueError("governance time moved backwards")
+        if observation.completed_outcome_count < previous.completed_outcome_count:
+            raise ValueError(
+                "completed outcome count moved backwards: "
+                f"{observation.completed_outcome_count} < {previous.completed_outcome_count}"
+            )
 
     def _trigger_codes(self, observation: StateObservation) -> list[str]:
         p = self.parameters
@@ -408,6 +465,8 @@ class AgentGovernanceStateMachine:
 
     def evaluate(self, observation: StateObservation) -> StateDecision:
         observation.validate()
+        self._reject_out_of_order(observation)
+        self._last_observation = observation
         previous_state = self.state
         if observation.telemetry_missing:
             self.missing_streak += 1
