@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+title: "Agent Governance Layer"
+message: "If you use this software, please cite it as below."
+type: software
+authors:
+  - family-names: "Li"
+    given-names: "Gaojie"
+    alias: "Narrrcis"
+    affiliation: "National University of Singapore"
+repository-code: "https://github.com/Narrrcis/agent-governance-layer"
+abstract: >-
+  A deterministic capability layer that sits between an autonomous agent and a
+  market venue. It turns observable reliability and risk signals into governance
+  states, maps those states to explicit capability envelopes, gates every order
+  before execution, and reconciles what actually executed against what was
+  authorized. Extracted from an AML-Sim multi-agent market research platform.
+keywords:
+  - agent safety
+  - guardrails
+  - LLM agents
+  - risk controls
+  - multi-agent systems
+  - market simulation
+license: MIT
+version: "0.2.0"
+date-released: "2026-09-07"

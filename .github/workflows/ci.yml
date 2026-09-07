@@ -8,6 +8,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
@@ -17,6 +18,72 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
-      - run: ruff check .
-      - run: pytest
+      - name: Lint
+        run: ruff check .
+      - name: Type check
+        run: mypy
+      - name: Test with coverage floor
+        run: pytest --cov=governance_layer --cov-report=term-missing
 
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip build twine
+      - name: Build sdist and wheel
+        run: python -m build
+      - name: Check metadata
+        run: twine check dist/*
+      - name: Verify the wheel ships py.typed
+        run: |
+          python - <<'PY'
+          import glob
+          import zipfile
+
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          assert "governance_layer/py.typed" in names, f"py.typed missing from {wheel}"
+          print(f"py.typed present in {wheel}")
+          PY
+      - name: Smoke test the installed wheel
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/python -m pip install --quiet dist/*.whl
+          /tmp/smoke/bin/python - <<'PY'
+          from datetime import datetime, timedelta, timezone
+
+          from governance_layer import (
+              OrderProposal,
+              PermissionExpiredError,
+              apply_permission,
+              permission_for,
+          )
+
+          now = datetime.now(timezone.utc).isoformat()
+          perm = permission_for(
+              run_id="smoke", agent_id="a", role="retail", state="RESTRICTED",
+              governance_time=now, reason_code="SMOKE", index=0,
+          )
+          order = OrderProposal(
+              order_id="o", agent_id="a", role="retail", instrument="AAPL",
+              side="SELL", quantity=15, order_type="MARKET", price=100.0,
+              source="smoke", proposed_at=now,
+          )
+          decision = apply_permission(order, 10, perm)
+          assert decision.decision == "CLIPPED_ZERO_CROSSING", decision.decision
+          assert decision.allowed_quantity == 10, decision.allowed_quantity
+
+          # The installed package must also enforce the validity window.
+          late = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+          try:
+              apply_permission(order, 10, perm, evaluation_time=late)
+          except PermissionExpiredError:
+              pass
+          else:
+              raise SystemExit("expired permission was accepted")
+
+          print("smoke test passed")
+          PY

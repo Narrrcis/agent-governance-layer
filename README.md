@@ -92,6 +92,12 @@ overstate confidence. Confidence-only calibration signals are therefore capped
 at `CAUTION`. Only material, independently observable risk can reach
 `RESTRICTED` or `ISOLATED`.
 
+**Fail-closed means no second answer.** A refusal must not be reachable by a
+fallback. Authorization is checked before any adapter call and outside the
+error-handling path, and only a declared `GovernanceAdapterError` degrades to
+scalar sizing. Every other exception propagates rather than being absorbed into
+an approval.
+
 ## Governance states
 
 `NORMAL -> CAUTION -> RESTRICTED -> ISOLATED -> STAGED_REENTRY_1 -> STAGED_REENTRY_2`
@@ -154,6 +160,17 @@ straight out of `pytest -v`:
 | A permission cannot be replayed against another agent | `test_permission_cannot_be_used_for_another_agent` |
 | Confidence-only signals reach at most `CAUTION` | `test_confidence_only_signal_never_exceeds_caution` |
 | Executed quantity comes from the observed delta, not the request | `test_the_executed_quantity_comes_from_the_observed_delta` |
+| A permission outside its validity window authorizes nothing | `test_an_expired_permission_cannot_authorize_an_order` |
+| No fallback or degraded path may answer a refusal | `test_hybrid_does_not_fall_back_when_the_permission_belongs_to_another_agent` |
+| Observed and claimed executed quantities must reconcile exactly | `test_a_claimed_fill_larger_than_the_observed_delta_is_rejected` |
+| A decision ID commits to the whole permission it labels | `test_a_different_state_yields_a_different_decision_id` |
+| An observation may not rewind index, time or evidence | `test_a_replayed_older_index_is_rejected` |
+
+Alongside the example tests, [`tests/test_properties.py`](tests/test_properties.py)
+asserts the unqualified properties over generated inputs with Hypothesis:
+reduce-only never crosses zero at any position or quantity, no severe state
+ever authorizes a net risk increase, and cumulative partial fills always
+reconcile against the observed book.
 
 ## Live execution binding
 
@@ -217,13 +234,22 @@ returned `allowed_quantity`.
 ```bash
 python -m pip install -e ".[dev]"
 ruff check .
-pytest
+mypy
+pytest --cov=governance_layer
 ```
 
-83 tests, no runtime dependencies outside the standard library, CI on Python
-3.11 to 3.13. Two of the tests replay a frozen paired-validation run that lives
-outside this repository; a clean clone reports them as skipped rather than
-silently passing. The API is alpha and may change.
+122 tests at 88% coverage, no runtime dependencies outside the standard
+library. CI runs lint, MyPy, the coverage floor, a source and wheel build,
+`twine check`, and a smoke test against the installed wheel on Python 3.11
+to 3.13. Two tests replay a frozen paired-validation run that lives outside
+this repository; a clean clone reports them as skipped rather than silently
+passing.
+
+The package version is deliberately separate from the `V2.1` governance policy
+and audit semantics versions, which are recorded in every artifact. See
+[`docs/INTEGRATION.md`](docs/INTEGRATION.md) for the call order, time source,
+exception semantics, threading model and audit integrity conditions. The API is
+pre-1.0 and may change.
 
 ## License
 
