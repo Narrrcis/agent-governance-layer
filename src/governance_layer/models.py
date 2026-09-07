@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .actual_risk import ActualNetRiskAuditV2
 
 
 class OrderIntent(str, Enum):
@@ -133,9 +136,13 @@ class GateDecision:
     reason: str
     assessment: IntentAssessment
     governance_forced_direction_change: bool = False
+    actual_net_risk_audit_v2: ActualNetRiskAuditV2 | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             **asdict(self),
             "assessment": self.assessment.to_dict(),
         }
+        if self.actual_net_risk_audit_v2 is not None:
+            result["actual_net_risk_audit_v2"] = self.actual_net_risk_audit_v2.to_dict()
+        return result

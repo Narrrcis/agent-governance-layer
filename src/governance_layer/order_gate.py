@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from .actual_risk import build_actual_net_risk_audit, finalize_actual_net_risk_audit
 from .models import (
     CapabilityPermission,
     GateDecision,
@@ -70,7 +71,7 @@ def assess_order(order: OrderProposal, position: int) -> IntentAssessment:
     )
 
 
-def apply_permission(
+def _apply_permission_core(
     order: OrderProposal,
     position: int,
     permission: CapabilityPermission,
@@ -179,6 +180,71 @@ def apply_permission(
         )
     return GateDecision(
         True, order.quantity, order.quantity, "ALLOWED", "WITHIN_PERMISSION", assessment
+    )
+
+
+def apply_permission(
+    order: OrderProposal,
+    position: int,
+    permission: CapabilityPermission,
+    *,
+    orders_this_interval: int = 0,
+    pre_long_position: int | None = None,
+    pre_short_position: int | None = None,
+) -> GateDecision:
+    """Apply capability permission and attach the V2.1 authorization audit.
+
+    Existing callers may continue supplying a signed net ``position``.  Runtimes
+    that maintain separate long and short books can supply both quantities so
+    the audit records the true pre-trade inventory.
+    """
+
+    if (pre_long_position is None) != (pre_short_position is None):
+        raise ValueError("provide both pre_long_position and pre_short_position")
+    if pre_long_position is None:
+        pre_long_position = max(0, position)
+        pre_short_position = max(0, -position)
+    assert pre_short_position is not None
+    if pre_long_position - pre_short_position != position:
+        raise ValueError("long/short positions do not match signed position")
+    decision = _apply_permission_core(
+        order,
+        position,
+        permission,
+        orders_this_interval=orders_this_interval,
+    )
+    return replace(
+        decision,
+        actual_net_risk_audit_v2=build_actual_net_risk_audit(
+            order,
+            pre_long_position=pre_long_position,
+            pre_short_position=pre_short_position,
+            allowed_quantity=decision.allowed_quantity,
+        ),
+    )
+
+
+def record_execution(
+    decision: GateDecision,
+    executed_quantity: int,
+    *,
+    post_long_position: int | None = None,
+    post_short_position: int | None = None,
+    execution_price: float | None = None,
+) -> GateDecision:
+    """Record the observed full or partial fill without changing the decision."""
+
+    if decision.actual_net_risk_audit_v2 is None:
+        raise ValueError("decision has no Actual Net Risk V2 audit")
+    return replace(
+        decision,
+        actual_net_risk_audit_v2=finalize_actual_net_risk_audit(
+            decision.actual_net_risk_audit_v2,
+            executed_quantity,
+            post_long_position=post_long_position,
+            post_short_position=post_short_position,
+            execution_price=execution_price,
+        ),
     )
 
 

@@ -1,5 +1,18 @@
 """Public API for the agent governance layer."""
 
+from .actual_risk import (
+    ACTUAL_NET_RISK_VERSION,
+    ActualNetRiskAuditV2,
+    RiskChange,
+    assess_native_execution_plan,
+    assess_observed_risk_change,
+    assess_risk_change,
+    build_actual_net_risk_audit,
+    finalize_actual_net_risk_audit,
+)
+from .execution_audit import ExecutionAuditEvent, StockSimExecutionAuditBridge
+from .fill_retention import FILL_RETENTION_VERSION, FillRetentionAccumulator
+from .hybrid import execute_hybrid, scalar_fallback_decision
 from .models import (
     CapabilityPermission,
     GateDecision,
@@ -8,37 +21,96 @@ from .models import (
     OrderProposal,
     RiskEffect,
 )
-from .order_gate import apply_permission, assess_order, pending_order_action
+from .order_gate import apply_permission, assess_order, pending_order_action, record_execution
+from .pending_guard import PendingNativeOrderDecision, pending_native_order_action
 from .permissions import ROLE_BASE, SCALAR_ACTION_CAP, STATE_RULES, permission_for
+from .runtime_binding import (
+    AUDIT_BINDING_VERSION,
+    AuditIntegrityReport,
+    AuditInvalidError,
+    ExecutionAuditRecorder,
+    NullExecutionAuditRecorder,
+    build_execution_audit_recorder,
+    fill_quantity_from_delta,
+    message_fill_key,
+    positions_from_snapshot,
+    recorder_from_env,
+)
+from .skew_matrix import SkewMatrixResult, run_authorization_execution_skew_matrix
 from .state_machine import (
+    ROLE_PARAMETER_OVERRIDES,
+    V21_FULL,
+    V21_LEAN,
     AgentGovernanceStateMachine,
+    GovernanceProfile,
     GovernanceState,
     PolicyParameters,
     StateDecision,
     StateObservation,
     confidence_calibration,
     eligible_completed_outcomes,
+    parameters_for_role,
 )
+from .static_experiment import ARMS, SCENARIOS, run_static_paired_comparison
+from .static_experiment_v2 import run_corrected_retention_comparison
 
 __all__ = [
+    "ACTUAL_NET_RISK_VERSION",
+    "ARMS",
+    "AUDIT_BINDING_VERSION",
+    "ActualNetRiskAuditV2",
     "AgentGovernanceStateMachine",
+    "AuditIntegrityReport",
+    "AuditInvalidError",
     "CapabilityPermission",
+    "ExecutionAuditEvent",
+    "ExecutionAuditRecorder",
+    "FILL_RETENTION_VERSION",
+    "FillRetentionAccumulator",
     "GateDecision",
+    "GovernanceProfile",
     "GovernanceState",
     "IntentAssessment",
+    "NullExecutionAuditRecorder",
     "OrderIntent",
     "OrderProposal",
+    "PendingNativeOrderDecision",
     "PolicyParameters",
     "ROLE_BASE",
+    "ROLE_PARAMETER_OVERRIDES",
+    "RiskChange",
     "RiskEffect",
     "SCALAR_ACTION_CAP",
+    "SCENARIOS",
     "STATE_RULES",
     "StateDecision",
     "StateObservation",
+    "StockSimExecutionAuditBridge",
+    "SkewMatrixResult",
+    "V21_FULL",
+    "V21_LEAN",
     "apply_permission",
+    "assess_native_execution_plan",
     "assess_order",
+    "assess_risk_change",
+    "assess_observed_risk_change",
+    "build_actual_net_risk_audit",
+    "build_execution_audit_recorder",
     "confidence_calibration",
     "eligible_completed_outcomes",
+    "execute_hybrid",
+    "fill_quantity_from_delta",
+    "finalize_actual_net_risk_audit",
+    "message_fill_key",
+    "parameters_for_role",
     "pending_order_action",
+    "pending_native_order_action",
     "permission_for",
+    "positions_from_snapshot",
+    "record_execution",
+    "recorder_from_env",
+    "run_corrected_retention_comparison",
+    "run_authorization_execution_skew_matrix",
+    "run_static_paired_comparison",
+    "scalar_fallback_decision",
 ]

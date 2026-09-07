@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
@@ -39,6 +39,18 @@ class GovernanceState(str, Enum):
     ISOLATED = "ISOLATED"
     STAGED_REENTRY_1 = "STAGED_REENTRY_1"
     STAGED_REENTRY_2 = "STAGED_REENTRY_2"
+
+
+@dataclass(frozen=True)
+class GovernanceProfile:
+    """Explicit Full/Lean handling for soft signals; hard controls are shared."""
+
+    name: str
+    caution_on_soft_signal: bool
+
+
+V21_FULL = GovernanceProfile("hybrid_v2_1_full", caution_on_soft_signal=True)
+V21_LEAN = GovernanceProfile("hybrid_v2_1_lean", caution_on_soft_signal=False)
 
 
 @dataclass(frozen=True)
@@ -138,6 +150,26 @@ class PolicyParameters:
         return cls(**parsed)
 
 
+# Intentionally empty in V2.1: this is the single, explicit extension point
+# for a future separately-approved role-specific threshold policy.  Keeping it
+# empty preserves all current policy values and avoids experimental retuning.
+ROLE_PARAMETER_OVERRIDES: dict[str, dict[str, float | int]] = {
+    "market_maker": {},
+    "retail": {},
+    "institutional": {},
+}
+
+
+def parameters_for_role(parameters: PolicyParameters, role: str) -> PolicyParameters:
+    """Return the current policy or a future explicit role-specific override."""
+
+    try:
+        overrides = ROLE_PARAMETER_OVERRIDES[role]
+    except KeyError as exc:
+        raise ValueError(f"unknown governance role: {role}") from exc
+    return replace(parameters, **overrides)
+
+
 @dataclass(frozen=True)
 class StateObservation:
     governance_index: int
@@ -156,6 +188,9 @@ class StateObservation:
     material_risk_breach: bool = False
     risk_limit_violation: bool = False
     material_risk_signal_count: int = 0
+    calibration_brier: float | None = None
+    calibration_ece: float | None = None
+    calibration_ready: bool = True
 
     def validate(self) -> StateObservation:
         now = parse_timestamp(self.governance_time)
@@ -174,6 +209,9 @@ class StateObservation:
         )
         if any(value < 0 for value in counts):
             raise ValueError("age, outcome, and signal counts must be non-negative")
+        for value in (self.calibration_brier, self.calibration_ece):
+            if value is not None and not 0.0 <= value <= 1.0:
+                raise ValueError("calibration Brier and ECE must be between zero and one")
         return self
 
 
@@ -195,6 +233,15 @@ class StateDecision:
     evidence_floor_completed_count: int
     old_evidence_rejected: bool
     unnecessary_intervention_candidate: bool
+    calibration_signal_active: bool
+    calibration_control_suppressed: bool
+    calibration_suppression_reason: str
+    calibration_brier: float | None
+    calibration_ece: float | None
+    calibration_ready: bool
+    calibration_trigger_codes: str
+    soft_signal_active: bool
+    soft_signal_recorded_only: bool
 
     @property
     def reentry_stage(self) -> int:
@@ -220,9 +267,15 @@ class AgentGovernanceStateMachine:
         GovernanceState.ISOLATED: 3,
     }
 
-    def __init__(self, agent_id: str, parameters: PolicyParameters) -> None:
+    def __init__(
+        self,
+        agent_id: str,
+        parameters: PolicyParameters,
+        profile: GovernanceProfile = V21_FULL,
+    ) -> None:
         self.agent_id = agent_id
         self.parameters = parameters
+        self.profile = profile
         self.state = GovernanceState.NORMAL
         self.last_transition_index = 0
         self.evidence_at_transition = 0
@@ -268,6 +321,37 @@ class AgentGovernanceStateMachine:
             triggers.append(f"MATERIAL_RISK_SIGNAL_COUNT_{observation.material_risk_signal_count}")
         return triggers
 
+    def _calibration_trigger_codes(self, observation: StateObservation) -> list[str]:
+        p = self.parameters
+        if observation.confidence_calibration <= p.calibration_restricted_threshold:
+            return ["CONFIDENCE_MISCALIBRATED_SEVERE"]
+        if observation.confidence_calibration <= p.calibration_caution_threshold:
+            return ["CONFIDENCE_MISCALIBRATED"]
+        return []
+
+    def _hard_blocker_codes(self, observation: StateObservation) -> list[str]:
+        """Conditions that must prevent or revoke recovery, independent of confidence."""
+
+        p = self.parameters
+        blockers: list[str] = []
+        if observation.telemetry_missing:
+            blockers.append("TELEMETRY_MISSING")
+        if observation.telemetry_age_intervals >= 2:
+            blockers.append("TELEMETRY_STALE_SEVERE")
+        if observation.exposure_ratio >= p.exposure_restricted_threshold:
+            blockers.append("EXPOSURE_SEVERE")
+        if observation.lagged_reliability <= p.reliability_restricted_threshold:
+            blockers.append("LAGGED_RELIABILITY_SEVERE")
+        if observation.delayed_outcome_count >= p.delayed_outcomes_restricted_threshold:
+            blockers.append("OUTCOMES_DELAYED_SEVERE")
+        if observation.material_risk_breach:
+            blockers.append("MATERIAL_RISK_BREACH")
+        if observation.risk_limit_violation or observation.current_risk_limit_scale < 0.25:
+            blockers.append("RISK_LIMIT_VIOLATION")
+        if observation.material_risk_signal_count >= p.material_risk_confirmation_signals:
+            blockers.append("MATERIAL_RISK_CONFIRMED")
+        return blockers
+
     def _material_override(self, observation: StateObservation) -> bool:
         return bool(
             observation.material_risk_breach
@@ -280,7 +364,8 @@ class AgentGovernanceStateMachine:
     def _required_severity(self, triggers: list[str]) -> int:
         if self.missing_streak >= self.parameters.persistent_telemetry_loss_intervals:
             return 3
-        if any(code.endswith("SEVERE") for code in triggers):
+        independent = [code for code in triggers if not code.startswith("CONFIDENCE_")]
+        if any(code.endswith("SEVERE") for code in independent):
             return 2
         if triggers:
             return 1
@@ -331,8 +416,20 @@ class AgentGovernanceStateMachine:
             self.missing_streak = 0
             self.fresh_streak += 1
         triggers = self._trigger_codes(observation)
+        calibration_triggers = self._calibration_trigger_codes(observation)
+        hard_blockers = self._hard_blocker_codes(observation)
         required_severity = self._required_severity(triggers)
+        soft_signal_active = bool(triggers) and not hard_blockers and required_severity == 1
+        effective_required_severity = (
+            0
+            if soft_signal_active and not self.profile.caution_on_soft_signal
+            else required_severity
+        )
         material_override = self._material_override(observation)
+        calibration_signal_active = bool(calibration_triggers)
+        confidence_only_warning = bool(calibration_triggers) and not any(
+            not code.startswith("CONFIDENCE_") for code in triggers
+        )
         changed = False
         direction = "HOLD"
         reason_code = "HOLD_NORMAL_NO_TRIGGER"
@@ -352,18 +449,49 @@ class AgentGovernanceStateMachine:
             changed, direction = self._transition(
                 GovernanceState.ISOLATED, observation, reset_recovery=True
             )
-        elif staged and observation.telemetry_missing:
-            reason_code = "REISOLATE_TELEMETRY_LOSS_DURING_REENTRY"
+        elif staged and hard_blockers:
+            reason_code = (
+                "REISOLATE_TELEMETRY_LOSS_DURING_REENTRY"
+                if observation.telemetry_missing
+                else f"REISOLATE_HARD_BLOCKER_{hard_blockers[0]}"
+            )
             changed, direction = self._transition(
                 GovernanceState.ISOLATED, observation, reset_recovery=True
             )
-        elif required_severity > self._SEVERITY[self.state]:
+        elif self.state == GovernanceState.ISOLATED:
+            new_evidence = observation.completed_outcome_count - self.recovery_evidence_floor
+            evidence_ready = new_evidence >= self.parameters.minimum_new_completed_outcomes
+            cooldown_ready = self._cooldown_remaining(observation.governance_index) == 0
+            if hard_blockers:
+                reason_code = f"HOLD_ISOLATED_HARD_BLOCKER_{hard_blockers[0]}"
+            elif evidence_ready and cooldown_ready:
+                if effective_required_severity > 0:
+                    reason_code = "RECOVER_TO_CAUTION_SOFT_WARNING"
+                    changed, direction = self._transition(GovernanceState.CAUTION, observation)
+                else:
+                    reason_code = "ENTER_STAGED_REENTRY_1_NEW_EVIDENCE"
+                    changed, direction = self._transition(
+                        GovernanceState.STAGED_REENTRY_1, observation
+                    )
+            elif not cooldown_ready:
+                reason_code = "HOLD_ISOLATED_COOLDOWN"
+            else:
+                reason_code = "HOLD_ISOLATED_NEW_EVIDENCE_REQUIRED"
+        elif staged and effective_required_severity == 1 and not hard_blockers:
+            # A residual soft warning must never be cleared by briefly entering
+            # NORMAL.  Recovery ends directly in CAUTION and preserves the raw
+            # warning in the audit fields below.
+            reason_code = "RECOVER_TO_CAUTION_SOFT_WARNING"
+            changed, direction = self._transition(GovernanceState.CAUTION, observation)
+        elif effective_required_severity > self._SEVERITY[self.state]:
             target = (
-                GovernanceState.RESTRICTED if required_severity == 2 else GovernanceState.CAUTION
+                GovernanceState.RESTRICTED
+                if effective_required_severity == 2
+                else GovernanceState.CAUTION
             )
             reason_code = f"ESCALATE_{target.value}_{triggers[0]}"
             changed, direction = self._transition(target, observation)
-        elif required_severity > 0:
+        elif effective_required_severity > 0:
             reason_code = (
                 "HOLD_ISOLATED_ACTIVE_RISK"
                 if self.state == GovernanceState.ISOLATED
@@ -373,17 +501,7 @@ class AgentGovernanceStateMachine:
             new_evidence = observation.completed_outcome_count - self.evidence_at_transition
             evidence_ready = new_evidence >= self.parameters.minimum_new_completed_outcomes
             cooldown_ready = self._cooldown_remaining(observation.governance_index) == 0
-            if self.state == GovernanceState.ISOLATED:
-                if evidence_ready and cooldown_ready:
-                    reason_code = "ENTER_STAGED_REENTRY_1_NEW_EVIDENCE"
-                    changed, direction = self._transition(
-                        GovernanceState.STAGED_REENTRY_1, observation
-                    )
-                elif not cooldown_ready:
-                    reason_code = "HOLD_ISOLATED_COOLDOWN"
-                else:
-                    reason_code = "HOLD_ISOLATED_NEW_EVIDENCE_REQUIRED"
-            elif self.state == GovernanceState.STAGED_REENTRY_1:
+            if self.state == GovernanceState.STAGED_REENTRY_1:
                 if evidence_ready and cooldown_ready:
                     reason_code = "ADVANCE_STAGED_REENTRY_2_NEW_EVIDENCE"
                     changed, direction = self._transition(
@@ -424,6 +542,16 @@ class AgentGovernanceStateMachine:
             and observation.completed_outcome_count - self.recovery_evidence_floor
             < self.parameters.minimum_new_completed_outcomes
         )
+        calibration_control_suppressed = bool(
+            confidence_only_warning
+            and previous_state
+            in {
+                GovernanceState.ISOLATED.value,
+                GovernanceState.STAGED_REENTRY_1.value,
+                GovernanceState.STAGED_REENTRY_2.value,
+            }
+            and not hard_blockers
+        )
         return StateDecision(
             previous_state=previous_state.value,
             governance_state=self.state.value,
@@ -446,6 +574,19 @@ class AgentGovernanceStateMachine:
                 and not material_override
                 and not observation.telemetry_missing
                 and previous_state == GovernanceState.NORMAL
+            ),
+            calibration_signal_active=calibration_signal_active,
+            calibration_control_suppressed=calibration_control_suppressed,
+            calibration_suppression_reason=(
+                "RECOVERY_SOFT_CONFIDENCE_ONLY" if calibration_control_suppressed else ""
+            ),
+            calibration_brier=observation.calibration_brier,
+            calibration_ece=observation.calibration_ece,
+            calibration_ready=observation.calibration_ready,
+            calibration_trigger_codes="|".join(calibration_triggers),
+            soft_signal_active=soft_signal_active,
+            soft_signal_recorded_only=(
+                soft_signal_active and not self.profile.caution_on_soft_signal
             ),
         )
 
